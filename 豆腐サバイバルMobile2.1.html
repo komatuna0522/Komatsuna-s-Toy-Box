@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>豆腐サバイバル：ハバネラ版</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background: #1b3019; position: fixed; }
+        #c { display: block; width: 100vw; height: 100vh; touch-action: none; }
+        #ui {
+            position: absolute; top: 15px; width: 100%; pointer-events: none;
+            color: white; text-align: center; font-family: 'Verdana', sans-serif;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8); z-index: 100;
+        }
+        .bar-container { width: 220px; height: 14px; background: rgba(0,0,0,0.5); border: 1px solid #fff; margin: 5px auto; border-radius: 7px; overflow: hidden; }
+        #hp-bar { width: 100%; height: 100%; background: linear-gradient(90deg, #ff416c, #ff4b2b); transition: width 0.2s; }
+        #boss-ui { display: none; margin-top: 5px; }
+        #boss-hp-bar { width: 100%; height: 100%; background: linear-gradient(90deg, #9d50bb, #6e48aa); }
+        #msg { color: #ffeb3b; font-size: 20px; font-weight: bold; }
+        .joy { position: absolute; bottom: 50px; width: 90px; height: 90px; background: rgba(255,255,255,0.05); border: 2px solid rgba(255,255,255,0.2); border-radius: 50%; z-index: 200; }
+        #m-joy { left: 40px; } #s-joy { right: 40px; }
+        .stk { position: absolute; top: 25px; left: 25px; width: 40px; height: 40px; background: rgba(255,255,255,0.3); border-radius: 50%; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div style="font-size: 18px;">SCORE: <span id="sc">0</span> | BOSS LV: <span id="bl">0</span></div>
+        <div class="bar-container"><div id="hp-bar"></div></div>
+        <div id="msg"></div>
+        <div id="boss-ui">
+            <div class="bar-container" style="height: 8px;"><div id="boss-hp-bar"></div></div>
+        </div>
+    </div>
+    <canvas id="c"></canvas>
+    <div id="m-joy" class="joy"><div class="stk"></div></div>
+    <div id="s-joy" class="joy"><div class="stk" style="background:rgba(255,100,100,0.4)"></div></div>
+
+<script>
+    // --- BGM設定（指定されたURLから直接読み込み） ---
+    const bgm = new Audio('https://amachamusic.chagasi.com/mp3/hirusagarinohabanera.mp3');
+    bgm.loop = true;
+    bgm.volume = 0.5;
+
+    // ユーザーが画面を操作した瞬間に再生を開始する
+    const initAudio = () => {
+        bgm.play().catch(e => console.log("Audio play blocked: ", e));
+        window.removeEventListener('touchstart', initAudio);
+        window.removeEventListener('mousedown', initAudio);
+    };
+    window.addEventListener('touchstart', initAudio);
+    window.addEventListener('mousedown', initAudio);
+
+    // --- ゲーム本体 ---
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    let w, h, score = 0, hp = 100, shake = 0, bossStage = 0, inv = 0;
+    let nextBossScore = 50, bossInterval = false;
+    const player = { x:0, y:0, vx:0, vy:0, dir:1, b:0, s:28 };
+    const enemies = [], bullets = [], eb = [], items = [];
+    let boss = null, shoot = { x:0, y:0, active:false }, lastAtk = 0;
+
+    function resize() {
+        w = window.innerWidth; h = window.innerHeight;
+        canvas.width = w; canvas.height = h;
+        if(player.x === 0) { player.x = w/2; player.y = h/2; }
+    }
+    window.addEventListener('resize', resize); resize();
+
+    function setupJoy(id, isShoot) {
+        const base = document.getElementById(id); const stick = base.querySelector('.stk');
+        let tid = null;
+        const handle = (e) => {
+            const t = Array.from(e.touches).find(t => t.identifier === tid); if(!t) return;
+            const r = base.getBoundingClientRect();
+            let dx = t.clientX - (r.left + 45), dy = t.clientY - (r.top + 45);
+            const dist = Math.hypot(dx, dy); if(dist > 45) { dx *= 45/dist; dy *= 45/dist; }
+            stick.style.transform = `translate(${dx}px, ${dy}px)`;
+            if(isShoot) shoot = { x:dx/45, y:dy/45, active: dist > 10 };
+            else { player.vx = (dx/45)*5.5; player.vy = (dy/45)*5.5; }
+        };
+        base.addEventListener('touchstart', e => { e.preventDefault(); tid = e.changedTouches[0].identifier; handle(e); }, {passive:false});
+        window.addEventListener('touchmove', e => handle(e), {passive:false});
+        window.addEventListener('touchend', e => { if(Array.from(e.changedTouches).some(t => t.identifier === tid)) { tid = null; stick.style.transform = ''; if(isShoot) shoot.active = false; else { player.vx = player.vy = 0; } } });
+    }
+    setupJoy('m-joy', false); setupJoy('s-joy', true);
+
+    function drawCube(x, y, s, col, b, dir, isBoss=false, alpha=1) {
+        ctx.globalAlpha = alpha;
+        const jump = Math.abs(Math.sin(b))*10;
+        const cw = s + Math.cos(b)*4, ch = s - Math.cos(b)*4;
+        ctx.save(); ctx.translate(x, y - jump);
+        ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.beginPath(); ctx.ellipse(0, jump, s*0.7, s*0.25, 0, 0, Math.PI*2); ctx.fill();
+        const d = s * 0.4;
+        ctx.fillStyle = isBoss ? '#441144' : (col === '#000' ? '#111' : '#bbb');
+        ctx.beginPath(); ctx.moveTo(cw/2*dir, 0); ctx.lineTo(cw/2*dir+d*dir, -d); ctx.lineTo(cw/2*dir+d*dir, -ch-d); ctx.lineTo(cw/2*dir, -ch); ctx.fill();
+        ctx.fillStyle = isBoss ? '#662266' : (col === '#000' ? '#222' : '#eee');
+        ctx.beginPath(); ctx.moveTo(-cw/2, -ch); ctx.lineTo(cw/2, -ch); ctx.lineTo(cw/2+d*dir, -ch-d); ctx.lineTo(-cw/2+d*dir, -ch-d); ctx.fill();
+        ctx.fillStyle = col; ctx.fillRect(-cw/2, -ch, cw, ch);
+        ctx.fillStyle = col === '#000' ? '#fff' : (isBoss ? '#f0f' : '#000');
+        ctx.fillRect(cw*0.25*dir-2, -ch+s*0.3, isBoss?8:4, isBoss?8:4);
+        ctx.restore(); ctx.globalAlpha = 1;
+    }
+
+    function loop() {
+        ctx.save();
+        if(shake > 0) { ctx.translate((Math.random()-0.5)*shake, (Math.random()-0.5)*shake); shake *= 0.9; }
+        ctx.fillStyle = boss ? '#2a1a2a' : '#4a7c44'; ctx.fillRect(0,0,w,h);
+        if(inv > 0) inv--;
+
+        player.x = Math.max(20, Math.min(w-20, player.x + player.vx));
+        player.y = Math.max(20, Math.min(h-20, player.y + player.vy));
+        if(player.vx || player.vy) player.b += 0.22;
+        if(shoot.active && Date.now() - lastAtk > 180) {
+            const a = Math.atan2(shoot.y, shoot.x);
+            bullets.push({ x:player.x, y:player.y-10, vx:Math.cos(a)*12, vy:Math.sin(a)*12 });
+            lastAtk = Date.now();
+        }
+
+        bullets.forEach((b, i) => {
+            b.x += b.vx; b.y += b.vy; ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, 7); ctx.fill();
+            if(b.x<0||b.x>w||b.y<0||b.y>h) bullets.splice(i, 1);
+        });
+
+        eb.forEach((b, i) => {
+            b.x += b.vx; b.y += b.vy; ctx.fillStyle = '#f0f'; ctx.beginPath(); ctx.arc(b.x, b.y, 6, 0, 7); ctx.fill();
+            if(inv <= 0 && Math.hypot(b.x-player.x, b.y-player.y) < 15) { 
+                hp -= 12; inv = 60; shake = 10; eb.splice(i,1); 
+                document.getElementById('hp-bar').style.width = hp+"%"; 
+            }
+            if(b.x<0||b.x>w||b.y<0||b.y>h) eb.splice(i, 1);
+        });
+
+        if(!boss && enemies.length < 8 + score/15) {
+            if(Math.random() < 0.04) {
+                const side = Math.floor(Math.random()*4);
+                enemies.push({ x:side%2?(side==1?w+50:-50):Math.random()*w, y:side%2?Math.random()*h:(side==0?-50:h+50), s:26, b:Math.random(), spd:1.5+score*0.005 });
+            }
+        }
+        enemies.forEach((e, i) => {
+            const a = Math.atan2(player.y-e.y, player.x-e.x);
+            e.x += Math.cos(a)*e.spd; e.y += Math.sin(a)*e.spd; e.b += 0.18;
+            drawCube(e.x, e.y, e.s, '#000', e.b, player.x > e.x ? 1 : -1);
+            if(inv <= 0 && Math.hypot(e.x-player.x, e.y-player.y) < 22) { hp -= 10; inv = 60; enemies.splice(i, 1); document.getElementById('hp-bar').style.width = hp+"%"; }
+            bullets.forEach((b, j) => {
+                if(Math.hypot(e.x-b.x, (e.y-e.s/2)-b.y) < 24) {
+                    bullets.splice(j, 1); score++; document.getElementById('sc').innerText = score;
+                    if(Math.random()<0.12) items.push({x:e.x, y:e.y, type:'heal'});
+                    enemies.splice(i, 1);
+                }
+            });
+        });
+
+        if(!boss && score >= nextBossScore && !bossInterval) {
+            bossInterval = true; document.getElementById('msg').innerText = "BOSS WARNING!";
+            setTimeout(() => {
+                document.getElementById('msg').innerText = ""; bossStage++;
+                document.getElementById('bl').innerText = bossStage;
+                boss = { x:w/2, y:-100, s:85, hp:40+(bossStage*30), max:40+(bossStage*30), b:0, atk:0 };
+                document.getElementById('boss-ui').style.display = 'block';
+                enemies.length = 0;
+            }, 2500);
+        }
+
+        if(boss) {
+            boss.b += 0.1; boss.atk++;
+            const ba = Math.atan2(player.y-boss.y, player.x-boss.x);
+            boss.x += (Math.cos(ba) * 1.1); boss.y += (Math.sin(ba) * 1.1);
+            if(boss.y < 120) boss.y += 2;
+            if(boss.atk % 110 === 0) {
+                for(let k=0; k<6; k++) eb.push({x:boss.x, y:boss.y, vx:Math.cos(k*Math.PI/3)*3.5, vy:Math.sin(k*Math.PI/3)*3.5});
+            }
+            drawCube(boss.x, boss.y, boss.s, '#220022', boss.b, player.x > boss.x ? 1 : -1, true);
+            bullets.forEach((b, j) => {
+                if(Math.hypot(boss.x-b.x, (boss.y-boss.s/2)-b.y) < 45) {
+                    bullets.splice(j, 1); boss.hp--; shake = 2;
+                    document.getElementById('boss-hp-bar').style.width = (boss.hp/boss.max*100)+"%";
+                    if(boss.hp <= 0) {
+                        score += 50; items.push({x:boss.x, y:boss.y, type:'fullheal'});
+                        boss = null; nextBossScore = score + 80; document.getElementById('boss-ui').style.display = 'none';
+                        setTimeout(() => bossInterval = false, 20000);
+                    }
+                }
+            });
+        }
+
+        items.forEach((it, i) => {
+            const isFull = it.type === 'fullheal';
+            drawCube(it.x, it.y, 18, isFull ? '#ffeb3b' : '#ff3333', Math.sin(Date.now()/100), 1);
+            if(Math.hypot(it.x-player.x, it.y-player.y) < 30) { hp = isFull ? 100 : Math.min(100, hp+40); document.getElementById('hp-bar').style.width = hp+"%"; items.splice(i,1); }
+        });
+
+        if(hp > 0) {
+            let pAlpha = (inv > 0 && Math.floor(inv/5)%2==0) ? 0.3 : 1;
+            drawCube(player.x, player.y, player.s, '#fff', player.b, player.dir, false, pAlpha);
+        } else { 
+            alert("GAME OVER\nSCORE: " + score); location.reload(); 
+        }
+        ctx.restore(); requestAnimationFrame(loop);
+    }
+    loop();
+</script>
+</body>
+</html>
+
