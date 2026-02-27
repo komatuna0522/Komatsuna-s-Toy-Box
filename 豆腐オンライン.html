@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>豆腐TDM：ランダムリスポーン版</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background: #4e7d42; font-family: sans-serif; position: fixed; }
+        canvas { display: block; touch-action: none; }
+        #ui { position: absolute; top: 15px; width: 100%; pointer-events: none; color: white; text-align: center; z-index: 100; text-shadow: 2px 2px 0 #000; }
+        #hp-ui { width: 220px; height: 18px; background: rgba(0,0,0,0.5); margin: 10px auto; border: 2px solid #fff; border-radius: 9px; overflow: hidden; }
+        #hp-fill { width: 100%; height: 100%; background: #0f0; transition: width 0.2s; }
+        #overlay, #respawn-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 1000; }
+        #respawn-overlay { display: none; background: rgba(139, 0, 0, 0.7); }
+        .team-btn { padding: 15px 30px; font-size: 18px; border: 4px solid #fff; border-radius: 12px; font-weight: bold; cursor: pointer; margin: 10px; color: white; }
+        #btn-red { background: #ff4444; } #btn-blue { background: #4444ff; }
+        input { padding: 15px; font-size: 20px; margin: 10px; border-radius: 8px; width: 220px; text-align: center; background:#333; color:#fff; border: 2px solid #555; }
+        .joy { position: absolute; bottom: 40px; width: 100px; height: 100px; background: rgba(255,255,255,0.2); border: 3px solid rgba(255,255,255,0.4); border-radius: 50%; z-index: 200; }
+        #m-joy { left: 30px; } #s-joy { right: 30px; }
+        .stk { position: absolute; top: 30px; left: 30px; width: 40px; height: 40px; background: #fff; border-radius: 50%; opacity: 0.7; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div style="font-size:20px;">Score: <span id="score">0 - 0</span></div>
+        <div id="hp-ui"><div id="hp-fill"></div></div>
+    </div>
+    <div id="respawn-overlay"><h1>YOU DIED</h1><p>RANDOM RESPAWNING...</p></div>
+    <div id="overlay">
+        <h2>チームを選択</h2>
+        <div id="team-select">
+            <button id="btn-red" class="team-btn" onclick="selectTeam('red')">RED</button>
+            <button id="btn-blue" class="team-btn" onclick="selectTeam('blue')">BLUE</button>
+        </div>
+        <div id="conn-setup" style="display:none; text-align:center;">
+            <p>ID: <strong id="my-id-display" style="color:#0f0">----</strong></p>
+            <input type="text" id="target-id" placeholder="相手のIDを入力">
+            <br>
+            <button class="team-btn" style="background:#555" onclick="join()">接続</button>
+            <button id="start-btn" class="team-btn" style="background:#28a745; display:none;" onclick="start()">開始</button>
+        </div>
+    </div>
+    <canvas id="c"></canvas>
+    <div id="m-joy" class="joy"><div class="stk"></div></div>
+    <div id="s-joy" class="joy"><div class="stk" style="background:#ff4444"></div></div>
+
+<script>
+    const myId = Math.random().toString(36).substring(2, 7).toUpperCase();
+    const peer = new Peer(myId);
+    let conns = [], players = {}, bullets = [], state = "lobby", scoreR = 0, scoreB = 0, myTeam = '';
+    let mv = { x: 0, y: 0 }, sh = { x: 0, y: 0, act: false, last: 0 };
+    const cvs = document.getElementById('c'), ctx = cvs.getContext('2d');
+
+    const wallConfig = [
+        {x: 0.2, y: 0.25, r: 45}, {x: 0.8, y: 0.25, r: -45},
+        {x: 0.2, y: 0.75, r: -45}, {x: 0.8, y: 0.75, r: 45}
+    ];
+
+    peer.on('open', id => { document.getElementById('my-id-display').innerText = id; });
+    peer.on('connection', c => listen(c));
+
+    function getRandomSpawnPos() {
+        // 壁に近すぎないランダム位置
+        return {
+            x: 100 + Math.random() * (window.innerWidth - 200),
+            y: 100 + Math.random() * (window.innerHeight - 200)
+        };
+    }
+
+    function selectTeam(t) {
+        myTeam = t;
+        const pos = getRandomSpawnPos();
+        players[myId] = { id: myId, team: t, hp: 100, live: true, inv: 60, x: pos.x, y: pos.y, anim: 0, offset: 0, dir: 1 };
+        document.getElementById('team-select').style.display = "none";
+        document.getElementById('conn-setup').style.display = "block";
+        document.getElementById('hp-fill').style.background = (t === 'red') ? '#ff4444' : '#4444ff';
+    }
+
+    function join() { const tid = document.getElementById('target-id').value.toUpperCase(); if(tid) listen(peer.connect(tid, { reliable: true })); }
+
+    function listen(c) {
+        c.on('open', () => { conns.push(c); send({ type: 'hi', id: myId, team: myTeam }); document.getElementById('start-btn').style.display = "inline-block"; });
+        c.on('data', d => {
+            if (d.type === 'hi') { 
+                const pos = getRandomSpawnPos();
+                players[d.id] = { id: d.id, team: d.team, hp: 100, live: true, inv: 60, x: pos.x, y: pos.y, anim: 0, offset: 0, dir: -1 }; 
+                document.getElementById('start-btn').style.display = "inline-block"; 
+            }
+            if (d.type === 'sync') { state = d.state; scoreR = d.scoreR; scoreB = d.scoreB; if(state==='play') document.getElementById('overlay').style.display="none"; }
+            if (d.type === 'pos') { if(players[d.id]) Object.assign(players[d.id], d.p); if(d.bullet) bullets.push(d.bullet); }
+            if (d.type === 'hit') { 
+                const t = players[d.targetId]; 
+                if(t) { t.hp = d.newHp; if(t.hp <= 0 && t.live) { t.live = false; if(t.team === 'red') scoreB++; else scoreR++; if(d.targetId === myId) triggerRespawn(); } } 
+            }
+        });
+    }
+
+    function triggerRespawn() {
+        document.getElementById('respawn-overlay').style.display = 'flex';
+        setTimeout(() => {
+            document.getElementById('respawn-overlay').style.display = 'none';
+            const me = players[myId];
+            const pos = getRandomSpawnPos();
+            me.hp = 100; me.live = true; me.inv = 120; me.x = pos.x; me.y = pos.y;
+            send({type:'pos', id:myId, p:me});
+        }, 3000);
+    }
+
+    function send(d) { conns.forEach(c => { if(c.open) c.send(d); }); }
+    function start() { state = 'play'; document.getElementById('overlay').style.display = "none"; send({ type: 'sync', state, scoreR, scoreB }); }
+
+    function drawCube(x, y, size, team, isInv, offset, dir, isWall = false, hp = null) {
+        const s = size; const h = s * 0.4 * dir; const dy = y - offset;
+        let base = isWall ? {f:'#222', s:'#000', t:'#333'} : (team === 'red' ? {f:'#f44', s:'#c33', t:'#f88'} : {f:'#44f', s:'#33c', t:'#88f'});
+        if (isInv) ctx.globalAlpha = 0.5;
+        ctx.fillStyle = base.s; ctx.beginPath(); ctx.moveTo(x + (s/2 * -dir), dy - s/2); ctx.lineTo(x + (s/2 * -dir) - h, dy - s/2 - Math.abs(h)/2); ctx.lineTo(x + (s/2 * -dir) - h, dy + s/2 - Math.abs(h)/2); ctx.lineTo(x + (s/2 * -dir), dy + s/2); ctx.fill();
+        ctx.fillStyle = base.t; ctx.beginPath(); ctx.moveTo(x - s/2, dy - s/2); ctx.lineTo(x - s/2 - h, dy - s/2 - Math.abs(h)/2); ctx.lineTo(x + s/2 - h, dy - s/2 - Math.abs(h)/2); ctx.lineTo(x + s/2, dy - s/2); ctx.fill();
+        ctx.fillStyle = base.f; ctx.fillRect(x - s/2, dy - s/2, s, s);
+        if(!isWall) { ctx.fillStyle = "#fff"; ctx.fillRect(x + (dir*8) - 10, dy - 6, 6, 6); ctx.fillRect(x + (dir*8) + 4, dy - 6, 6, 6); }
+        if(hp !== null && hp < 100) {
+            ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(x - 25, dy - s - 10, 50, 6);
+            ctx.fillStyle = (team === 'red') ? "#f44" : "#44f"; ctx.fillRect(x - 25, dy - s - 10, 50 * (hp/100), 6);
+        }
+        ctx.globalAlpha = 1.0;
+    }
+
+    function loop() {
+        cvs.width = window.innerWidth; cvs.height = window.innerHeight;
+        ctx.fillStyle = "#4e7d42"; ctx.fillRect(0,0,cvs.width,cvs.height);
+        
+        const me = players[myId];
+        if (state === 'play' && me && me.live) {
+            me.x = Math.max(30, Math.min(cvs.width-30, me.x + mv.x));
+            me.y = Math.max(30, Math.min(cvs.height-30, me.y + mv.y));
+            if(mv.x !== 0) me.dir = mv.x > 0 ? 1 : -1;
+            if(me.inv > 0) me.inv--;
+            me.anim += (Math.hypot(mv.x, mv.y) > 0.1) ? 0.25 : 0; me.offset = Math.abs(Math.sin(me.anim)) * 12;
+            let nb = null;
+            if (sh.act && Date.now()-sh.last > 200) {
+                const a = Math.atan2(sh.y, sh.x);
+                nb = { x:me.x, y:me.y-me.offset, vx:Math.cos(a)*18, vy:Math.sin(a)*18, team:me.team, owner:myId };
+                bullets.push(nb); sh.last = Date.now();
+            }
+            send({ type: 'pos', id: myId, p: me, bullet: nb });
+            document.getElementById('hp-fill').style.width = Math.max(0, me.hp) + "%";
+        }
+
+        wallConfig.forEach(w => {
+            ctx.save(); ctx.translate(w.x*cvs.width, w.y*cvs.height); ctx.rotate(w.r * Math.PI/180);
+            drawCube(0, 0, 45, '', false, 0, 1, true); 
+            ctx.restore();
+        });
+
+        bullets.forEach((b, i) => {
+            b.x += b.vx; b.y += b.vy;
+            ctx.fillStyle = b.team==='red'?'#fff':'#222'; ctx.beginPath(); ctx.arc(b.x, b.y, 6, 0, 7); ctx.fill();
+
+            wallConfig.forEach(w => {
+                const dx = b.x - w.x*cvs.width, dy = b.y - w.y*cvs.height;
+                const cos = Math.cos(-w.r * Math.PI/180), sin = Math.sin(-w.r * Math.PI/180);
+                const rx = dx * cos - dy * sin, ry = dx * sin + dy * cos;
+                if(Math.abs(rx) < 30 && Math.abs(ry) < 30) bullets.splice(i,1);
+            });
+
+            Object.keys(players).forEach(id => {
+                const t = players[id];
+                if (t.live && t.inv <= 0 && t.team !== b.team && Math.hypot(b.x-t.x, b.y-(t.y-t.offset)) < 30) {
+                    bullets.splice(i,1);
+                    if (b.owner === myId) {
+                        t.hp -= 20;
+                        if(t.hp <= 0 && t.live) { t.live = false; if(t.team === 'red') scoreB++; else scoreR++; }
+                        send({ type: 'hit', targetId: id, newHp: t.hp });
+                    }
+                }
+            });
+            if (b.x<0||b.x>cvs.width||b.y<0||b.y>cvs.height) bullets.splice(i,1);
+        });
+
+        Object.keys(players).forEach(id => {
+            const p = players[id];
+            if(p.live) drawCube(p.x, p.y, 45, p.team, p.inv > 0, p.offset, p.dir, false, (p.id !== myId ? p.hp : null));
+        });
+
+        document.getElementById('score').innerText = (myTeam==='red' ? `${scoreR} - ${scoreB}` : `${scoreB} - ${scoreR}`);
+        requestAnimationFrame(loop);
+    }
+
+    function setJoy(id, isS) {
+        const b = document.getElementById(id), s = b.querySelector('.stk');
+        let tid = null;
+        b.addEventListener('touchstart', e => { e.preventDefault(); tid = e.changedTouches[0].identifier; }, {passive:false});
+        window.addEventListener('touchmove', e => {
+            const t = Array.from(e.touches).find(v => v.identifier === tid); if(!t) return;
+            const r = b.getBoundingClientRect(), dx = t.clientX-(r.left+50), dy = t.clientY-(r.top+50), dist = Math.hypot(dx,dy);
+            const mx = (dx/50)*Math.min(1, 50/dist), my = (dy/50)*Math.min(1, 50/dist);
+            s.style.transform = `translate(${mx*30}px,${my*30}px)`;
+            if(isS) { sh.x = mx; sh.y = my; sh.act = dist > 15; } else { mv.x = mx*7; mv.y = my*7; }
+        }, {passive:false});
+        window.addEventListener('touchend', e => { if(Array.from(e.changedTouches).some(v => v.identifier === tid)) { tid=null; s.style.transform=''; if(isS) sh.act=false; else {mv.x=0; mv.y=0;} } });
+    }
+    setJoy('m-joy', false); setJoy('s-joy', true);
+    loop();
+</script>
+</body>
+</html>
+
